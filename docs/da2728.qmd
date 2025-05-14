@@ -1,0 +1,101 @@
+---
+title: "Daily_assignement_27"
+author: "Kelbi Hall"
+format: 
+  html:
+    self-contained: true
+    theme: default
+editor: visual
+---
+
+```{r}
+# Load required packages
+library(osmdata)
+library(elevatr)
+library(sf)
+library(terra)
+library(tidyverse)
+library(zoo)
+
+# Step 1: Get bounding box for Fort Collins using getbb()
+fc_bbox <- getbb("Fort Collins, Colorado", format_out = "matrix")
+
+# Step 2: Download waterway lines from OpenStreetMap
+foco_rivers <- opq(fc_bbox) |> 
+  add_osm_feature("waterway") |> 
+  osmdata_sf()
+
+# Step 3: Filter for Cache la Poudre River and merge lines
+poudre_river <- foco_rivers$osm_lines %>%
+  filter(str_detect(name, regex("Poudre", ignore_case = TRUE))) %>%
+  st_union() %>%
+  st_as_sf()
+
+# Step 4: Buffer river to define area to get elevation data
+river_buffer <- st_transform(poudre_river, 5070) |>  # project to meters
+  st_buffer(1000) |>                                # buffer 1000m
+  st_transform(4326)                                # back to lat/lon
+
+# Step 5: Download DEM using elevatr
+# z = 12 is a good balance of resolution vs size
+dem <- get_elev_raster(locations = river_buffer, z = 12, clip = "locations")
+
+# Convert RasterLayer to SpatRaster for terra compatibility
+dem <- terra::rast(dem)
+
+# Optional: save DEM for reuse
+writeRaster(dem, "poudre_dem_elevatr.tif", overwrite = TRUE)
+
+# Step 6: Convert river line to points
+poudre_pts <- st_cast(poudre_river, "POINT")
+
+# Step 7: Extract elevation values at river points using terra explicitly
+elev <- terra::extract(dem, terra::vect(poudre_pts))
+
+# Step 8: Combine elevation with points and add ID
+poudre_profile <- bind_cols(poudre_pts, elev) %>%
+  mutate(ID = row_number())
+
+# Step 9: Plot elevation profile with ggplot using column index
+ggplot(poudre_profile, aes(x = ID, y = elev[[2]])) +
+  geom_line(color = "steelblue") +
+  geom_smooth(se = FALSE, color = "darkred", method = "loess") +
+  labs(title = "Cache la Poudre River Elevation Profile",
+       x = "River Point ID",
+       y = "Elevation (m)") +
+  theme_minimal()
+
+# Step 10: Add elevation column to profile for mapping
+poudre_profile$elevation <- elev[[2]]
+
+# Step 11: ggplot spatial river map colored by elevation
+ggplot(poudre_profile) +
+  geom_sf(aes(color = elevation), size = 1) +
+  scale_color_viridis_c(option = "C", name = "Elevation (m)") +
+  labs(title = "Spatial River Profile of Cache la Poudre River") +
+  theme_minimal()
+
+# Step 12: Base R plot of raw elevation profile
+profile <- elev[[2]]
+
+plot(profile, type = "l", main = "Elevation Profile Along Cache la Poudre River",
+     xlab = "Point Index", ylab = "Elevation (m)")
+lines(zoo::rollmean(profile, k = 10), col = "darkred", lwd = 2)
+
+# Step 13: Compute river length
+river_length <- st_length(poudre_river)
+
+# Step 14: Compute sinuosity
+start_pt <- poudre_pts[1, ]
+end_pt <- poudre_pts[nrow(poudre_pts), ]
+straight_dist <- st_distance(start_pt, end_pt)
+sinuosity <- river_length / straight_dist
+print(paste("Sinuosity:", round(as.numeric(sinuosity), 3)))
+
+# Step 15: Compute slope
+elev_diff <- profile[1] - profile[length(profile)]
+slope <- elev_diff / as.numeric(river_length)
+print(paste("Slope:", round(as.numeric(slope), 4)))
+
+
+```
